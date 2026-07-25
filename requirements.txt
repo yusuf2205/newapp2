@@ -1,0 +1,15 @@
+# --- ядро ---
+aiogram>=3.7,<4
+python-dotenv>=1.0
+gspread>=6.0
+google-auth>=2.30
+
+# --- работа с PDF/изображениями ---
+pypdfium2>=4.30
+Pillow>=10.3
+
+# --- OCR-движки (ставьте только нужный) ---
+anthropic>=0.40        # OCR_ENGINE=anthropic
+# openai>=1.40         # OCR_ENGINE=openai
+# google-genai>=0.3    # OCR_ENGINE=gemini
+# pytesseract>=0.3.10  # OCR_ENGINE=tesseract (+ системный пакет tesseract-ocr)
