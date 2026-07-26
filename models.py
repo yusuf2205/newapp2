@@ -21,13 +21,17 @@ COLUMNS = [
     "Валюта",
     "Исполнитель",
     "Примечание",
+    "ИНН",
 ]
 
 EMPLOYEE_COLUMNS = ["Telegram ID", "ФИО", "Должность", "Дата", "Статус"]
 
+PROJECT_COLUMNS = ["Название"]
+
 CURRENCIES = {"UZS", "USD", "EUR", "RUB"}
 
 _NUM_RE = re.compile(r"-?\d[\d\s\u00a0.,']*")
+_PERCENT_RE = re.compile(r"(\d{1,3})\s*%")
 
 
 def parse_amount(value) -> Decimal | None:
@@ -73,6 +77,30 @@ def format_amount(value: Decimal | None) -> str:
     return f"{value:.2f}"
 
 
+def _resolve_amounts(data: dict) -> tuple[Decimal | None, Decimal | None]:
+    """Обычный документ (счёт/чек/договор): total/paid берутся как распознаны.
+
+    Бланк заявки на оплату (поля «Сумма оплаты в сумах» + «Примечание»): «Примечание»
+    может быть '100% оплата', 'предоплата' или, например, '30% оплата'. Для последнего
+    случая пересчитываем общую сумму контракта по проценту; для 100%/предоплаты и для
+    нераспознанного процента считаем, что сумма оплаты — это и есть вся сумма контракта.
+    """
+    payment_amount = parse_amount(data.get("payment_amount"))
+    if payment_amount is None:
+        return parse_amount(data.get("total")), parse_amount(data.get("paid"))
+
+    payment_note = clean_text(data.get("payment_note"), "")
+    percent_match = _PERCENT_RE.search(payment_note)
+    percent = int(percent_match.group(1)) if percent_match else None
+
+    if percent and 0 < percent < 100:
+        total = (payment_amount * Decimal(100) / Decimal(percent)).quantize(Decimal("0.01"))
+    else:
+        total = payment_amount
+
+    return total, payment_amount
+
+
 def clean_text(value, fallback: str = NOT_SET) -> str:
     if value is None:
         return fallback
@@ -96,6 +124,7 @@ class DocumentData:
     currency: str = "UZS"
     executor: str = NOT_SET
     note: str = ""
+    inn: str = NOT_SET
     raw_text: str = field(default="", repr=False)
 
     @property
@@ -111,19 +140,27 @@ class DocumentData:
         if currency not in CURRENCIES:
             currency = default_currency
 
-        contract_type = clean_text(data.get("contract_type"), "Местный")
-        if contract_type.lower() not in {"местный", "импорт"}:
-            contract_type = "Местный"
-        contract_type = contract_type.capitalize()
+        # Тип контракта определяется валютой фактической суммы оплаты, а не тем, что
+        # (возможно, ошибочно) вернула модель/эвристика в отдельном поле.
+        contract_type = "Импорт" if currency != "UZS" else "Местный"
+
+        total, paid = _resolve_amounts(data)
 
         return cls(
+            project=clean_text(data.get("project")),
             counterparty=clean_text(data.get("counterparty")),
             contract=clean_text(data.get("contract")),
             contract_type=contract_type,
+            # Бланк заявки на оплату товар не содержит — там его по-прежнему спросит
+            # Телеграм. В обычном договоре (напр. из Google Диска) поле «Предмет
+            # договора»/«Наименование товара» есть — если OCR его нашёл, спрашивать
+            # уже не нужно.
             goods=clean_text(data.get("goods")),
-            total=parse_amount(data.get("total")),
-            paid=parse_amount(data.get("paid")),
+            total=total,
+            paid=paid,
             currency=currency,
+            executor=clean_text(data.get("executor")),
+            inn=clean_text(data.get("inn")),
             raw_text=str(data.get("raw_text", ""))[:4000],
         )
 
@@ -140,6 +177,7 @@ class DocumentData:
             self.currency,
             self.executor,
             self.note,
+            self.inn,
         ]
 
     def to_state(self) -> dict:
@@ -170,4 +208,5 @@ class DocumentData:
             f"• Остаток (Долг): {format_amount(self.balance)} {cur}\n"
             f"• Исполнитель: {self.executor}"
             + (f" ({self.note})" if self.note else "")
+            + (f"\n• ИНН: {self.inn}" if self.inn != NOT_SET else "")
         )

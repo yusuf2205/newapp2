@@ -38,8 +38,13 @@ class EmployeeMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: dict[str, Any],
     ) -> Any:
+        chat = getattr(event, "chat", None) or getattr(getattr(event, "message", None), "chat", None)
+        is_private = chat is None or chat.type == "private"
+
         user = data.get("event_from_user")
-        data["employee"] = await self._get(user.id) if user else None
+        # В группе (поток извлечения ИНН) карточка сотрудника не нужна — не дёргаем
+        # Sheets лишний раз на каждое сообщение.
+        data["employee"] = await self._get(user.id) if user and is_private else None
         data["employees_cache"] = self
         if isinstance(event, (Message, CallbackQuery)):
             data["repo"] = self._repo

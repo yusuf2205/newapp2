@@ -11,5 +11,6 @@ class Registration(StatesGroup):
 class DocumentFlow(StatesGroup):
     choosing_project = State()
     custom_project = State()
+    asking_goods = State()
     confirming = State()
     editing_value = State()

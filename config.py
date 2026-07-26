@@ -28,6 +28,20 @@ class Settings:
     # --- Telegram ---
     bot_token: str = field(default_factory=lambda: _env("BOT_TOKEN"))
     admin_ids: set[int] = field(default_factory=lambda: _env_ids("ADMIN_IDS"))
+    # Группа, где коллеги выкладывают договора для извлечения ИНН. Пусто = любая
+    # группа, куда добавлен бот (удобно для старта — потом можно сузить до одной).
+    inn_group_id: int = field(default_factory=lambda: int(_env("INN_GROUP_CHAT_ID", "0") or "0"))
+
+    # --- Google Диск: автослежение за папкой с договорами ---
+    # Пусто = функция выключена. Папку нужно открыть сервисному аккаунту бота
+    # (client_email из credentials.json) как минимум с правом «читатель».
+    drive_folder_id: str = field(default_factory=lambda: _env("GOOGLE_DRIVE_FOLDER_ID"))
+    drive_poll_seconds: int = field(
+        default_factory=lambda: int(_env("DRIVE_POLL_SECONDS", "300") or "300")
+    )
+    drive_notify_chat_id: int = field(
+        default_factory=lambda: int(_env("DRIVE_NOTIFY_CHAT_ID", "0") or "0")
+    )
 
     # --- OCR: anthropic | openai | gemini | tesseract ---
     ocr_engine: str = field(default_factory=lambda: _env("OCR_ENGINE", "anthropic").lower())
@@ -51,6 +65,7 @@ class Settings:
     )
     sheet_data: str = field(default_factory=lambda: _env("SHEET_DATA", "Данные"))
     sheet_employees: str = field(default_factory=lambda: _env("SHEET_EMPLOYEES", "Сотрудники"))
+    sheet_projects: str = field(default_factory=lambda: _env("SHEET_PROJECTS", "Проекты"))
 
     # --- Бизнес-справочники ---
     projects: list[str] = field(

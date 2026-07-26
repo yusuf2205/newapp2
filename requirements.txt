@@ -3,13 +3,16 @@ aiogram>=3.7,<4
 python-dotenv>=1.0
 gspread>=6.0
 google-auth>=2.30
+google-api-python-client>=2.140  # автослежение за папкой Google Диска
 
-# --- работа с PDF/изображениями ---
+# --- работа с PDF/изображениями/Word ---
 pypdfium2>=4.30
 Pillow>=10.3
+python-docx>=1.1
+openpyxl>=3.1
 
 # --- OCR-движки (ставьте только нужный) ---
 anthropic>=0.40        # OCR_ENGINE=anthropic
 # openai>=1.40         # OCR_ENGINE=openai
 # google-genai>=0.3    # OCR_ENGINE=gemini
-# pytesseract>=0.3.10  # OCR_ENGINE=tesseract (+ системный пакет tesseract-ocr)
+pytesseract>=0.3.10    # OCR_ENGINE=tesseract (+ системный пакет tesseract-ocr)

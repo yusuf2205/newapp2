@@ -1,3 +1,3 @@
-from . import documents, registration
+from . import documents, inn_group, registration
 
-__all__ = ["registration", "documents"]
+__all__ = ["registration", "documents", "inn_group"]

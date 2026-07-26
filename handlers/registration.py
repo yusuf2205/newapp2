@@ -12,6 +12,7 @@ from sheets import SheetsRepo
 from states import Registration
 
 router = Router(name="registration")
+router.message.filter(F.chat.type == "private")
 
 WELCOME_BACK = (
     "👋 С возвращением, <b>{fio}</b> ({position})!\n\n"

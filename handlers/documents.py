@@ -10,14 +10,17 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from config import settings
-from keyboards import EDITABLE_FIELDS, confirm_kb, edit_fields_kb, projects_kb
+from keyboards import EDITABLE_FIELDS, confirm_kb, edit_fields_kb, projects_kb, skip_goods_kb
 from models import CURRENCIES, NOT_SET, DocumentData, clean_text, format_amount, parse_amount
 from ocr import OcrEngine, OcrError
+from ocr.docx_engine import DOCX_MIME, recognize_docx
+from ocr.xlsx_engine import XLSX_MIME, recognize_xlsx
 from sheets import SheetsRepo
 from states import DocumentFlow
 
 logger = logging.getLogger(__name__)
 router = Router(name="documents")
+router.message.filter(F.chat.type == "private")
 
 MAX_FILE_SIZE = 20 * 1024 * 1024  # лимит скачивания файлов Bot API
 NEED_REGISTRATION = "🔒 Сначала пройдите регистрацию — отправьте /start."
@@ -37,6 +40,29 @@ async def _show_card(message: Message, doc: DocumentData) -> None:
     await message.edit_text(doc.as_card(), reply_markup=confirm_kb())
 
 
+def _goods_step(doc: DocumentData) -> tuple[object, str, object]:
+    """Товар уже найден в самом документе (напр. «Предмет договора») — не спрашиваем
+    в Телеграме, сразу показываем карточку подтверждения."""
+    if doc.goods != NOT_SET:
+        return DocumentFlow.confirming, doc.as_card(), confirm_kb()
+    return (
+        DocumentFlow.asking_goods,
+        f"📦 Проект: «{doc.project}».\nУкажите товар/услугу:",
+        skip_goods_kb(),
+    )
+
+
+def _all_projects(repo: SheetsRepo) -> list[str]:
+    """Список из .env + запомненные через «➕ Другой», без дублей, в порядке добавления."""
+    merged = list(settings.projects)
+    lowered = {p.lower() for p in merged}
+    for name in repo.custom_projects():
+        if name.lower() not in lowered:
+            merged.append(name)
+            lowered.add(name.lower())
+    return merged
+
+
 # --------------------- приём файла ---------------------
 
 
@@ -47,13 +73,15 @@ async def handle_file(
     bot: Bot,
     ocr: OcrEngine,
     employee: dict | None,
+    repo: SheetsRepo,
 ) -> None:
     if not employee:
         await message.answer(NEED_REGISTRATION)
         return
 
     current = await state.get_state()
-    if current in {DocumentFlow.choosing_project.state, DocumentFlow.confirming.state,
+    if current in {DocumentFlow.choosing_project.state, DocumentFlow.custom_project.state,
+                   DocumentFlow.asking_goods.state, DocumentFlow.confirming.state,
                    DocumentFlow.editing_value.state}:
         data = await state.get_data()
         group = message.media_group_id
@@ -73,8 +101,25 @@ async def handle_file(
         document = message.document
         mime_type = (document.mime_type or "").lower()
         file_size = document.file_size or 0
-        if not (mime_type.startswith("image/") or mime_type == "application/pdf"):
-            await message.answer("⚠️ Поддерживаются только изображения и PDF-файлы.")
+        if not (
+            mime_type.startswith("image/")
+            or mime_type == "application/pdf"
+            or mime_type == DOCX_MIME
+            or mime_type == XLSX_MIME
+        ):
+            if mime_type == "application/msword":
+                await message.answer(
+                    "⚠️ Старый формат .doc не поддерживается — пересохраните как .docx."
+                )
+            elif mime_type in {
+                "application/vnd.ms-excel",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.template",
+            }:
+                await message.answer(
+                    "⚠️ Старый формат .xls не поддерживается — пересохраните как .xlsx."
+                )
+            else:
+                await message.answer("⚠️ Поддерживаются изображения, PDF, .docx и .xlsx.")
             return
         file_id = document.file_id
 
@@ -87,7 +132,13 @@ async def handle_file(
     try:
         buffer = BytesIO()
         await bot.download(file_id, destination=buffer)
-        recognized = await ocr.recognize(buffer.getvalue(), mime_type)
+        content = buffer.getvalue()
+        if mime_type == DOCX_MIME:
+            recognized = await recognize_docx(content)
+        elif mime_type == XLSX_MIME:
+            recognized = await recognize_xlsx(content)
+        else:
+            recognized = await ocr.recognize(content, mime_type)
     except OcrError as exc:
         logger.warning("OCR failed: %s", exc)
         await status.edit_text(f"❌ Не удалось распознать документ.\n<code>{exc}</code>")
@@ -98,22 +149,33 @@ async def handle_file(
         return
 
     doc = DocumentData.from_ocr(recognized, settings.default_currency)
-    doc.executor = employee["fio"]
-    doc.note = employee["position"]
+    if doc.executor == NOT_SET:  # «Ответственный» не найден в документе — берём из Telegram
+        doc.executor = employee["fio"]
+
+    identity = f"{employee['fio']} ({employee['position']})"
+    doc_number = clean_text(recognized.get("doc_number"), "")
+    doc.note = f"{doc_number} — {identity}" if doc_number else identity
 
     await _save_doc(state, doc)
     await state.update_data(media_group_id=message.media_group_id)
-    await state.set_state(DocumentFlow.choosing_project)
-    await status.edit_text(
-        "🏗 Выберите проект (объект):", reply_markup=projects_kb(settings.projects)
-    )
+
+    if doc.project != NOT_SET:
+        # Проект уже распознан из документа («№ Заказа/Проект») — ручной выбор не нужен.
+        state_, text, kb = _goods_step(doc)
+        await state.set_state(state_)
+        await status.edit_text(text, reply_markup=kb)
+    else:
+        await state.set_state(DocumentFlow.choosing_project)
+        await status.edit_text(
+            "🏗 Выберите проект (объект):", reply_markup=projects_kb(_all_projects(repo))
+        )
 
 
 # --------------------- выбор проекта ---------------------
 
 
 @router.callback_query(DocumentFlow.choosing_project, F.data.startswith("proj:"))
-async def choose_project(call: CallbackQuery, state: FSMContext) -> None:
+async def choose_project(call: CallbackQuery, state: FSMContext, repo: SheetsRepo) -> None:
     value = call.data.split(":", 1)[1]
 
     if value == "other":
@@ -128,15 +190,16 @@ async def choose_project(call: CallbackQuery, state: FSMContext) -> None:
         await state.clear()
         return
 
-    doc.project = settings.projects[int(value)]
+    doc.project = _all_projects(repo)[int(value)]
     await _save_doc(state, doc)
-    await state.set_state(DocumentFlow.confirming)
-    await _show_card(call.message, doc)
+    state_, text, kb = _goods_step(doc)
+    await state.set_state(state_)
+    await call.message.edit_text(text, reply_markup=kb)
     await call.answer()
 
 
 @router.message(DocumentFlow.custom_project, F.text)
-async def custom_project(message: Message, state: FSMContext) -> None:
+async def custom_project(message: Message, state: FSMContext, repo: SheetsRepo) -> None:
     doc = await _load_doc(state)
     if not doc:
         await state.clear()
@@ -144,9 +207,44 @@ async def custom_project(message: Message, state: FSMContext) -> None:
         return
 
     doc.project = clean_text(message.text)
+    if doc.project != NOT_SET:
+        await repo.add_project(doc.project)
+    await _save_doc(state, doc)
+    state_, text, kb = _goods_step(doc)
+    await state.set_state(state_)
+    await message.answer(text, reply_markup=kb)
+
+
+# --------------------- товар/услуга ---------------------
+
+
+@router.message(DocumentFlow.asking_goods, F.text)
+async def set_goods(message: Message, state: FSMContext) -> None:
+    doc = await _load_doc(state)
+    if not doc:
+        await state.clear()
+        await message.answer("Данные устарели, отправьте документ заново.")
+        return
+
+    doc.goods = clean_text(message.text)
     await _save_doc(state, doc)
     await state.set_state(DocumentFlow.confirming)
     await message.answer(doc.as_card(), reply_markup=confirm_kb())
+
+
+@router.callback_query(DocumentFlow.asking_goods, F.data == "goods:skip")
+async def skip_goods(call: CallbackQuery, state: FSMContext) -> None:
+    doc = await _load_doc(state)
+    if not doc:
+        await state.clear()
+        await call.answer("Данные устарели, отправьте документ заново", show_alert=True)
+        return
+
+    doc.goods = NOT_SET
+    await _save_doc(state, doc)
+    await state.set_state(DocumentFlow.confirming)
+    await _show_card(call.message, doc)
+    await call.answer()
 
 
 # --------------------- подтверждение / отмена ---------------------
@@ -240,7 +338,7 @@ async def edit_field(call: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.message(DocumentFlow.editing_value, F.text)
-async def apply_edit(message: Message, state: FSMContext) -> None:
+async def apply_edit(message: Message, state: FSMContext, repo: SheetsRepo) -> None:
     data = await state.get_data()
     key = data.get("edit_field")
     doc = await _load_doc(state)
@@ -271,6 +369,8 @@ async def apply_edit(message: Message, state: FSMContext) -> None:
         doc.contract_type = value.capitalize()
     else:
         setattr(doc, key, clean_text(value))
+        if key == "project" and doc.project != NOT_SET:
+            await repo.add_project(doc.project)
 
     await _save_doc(state, doc)
     await state.set_state(DocumentFlow.confirming)

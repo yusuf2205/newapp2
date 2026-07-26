@@ -16,6 +16,7 @@ EDITABLE_FIELDS = {
     "currency": ("Валюта", "currency"),
     "note": ("Примечание", "note"),
     "project": ("Проект", "project"),
+    "inn": ("ИНН", "inn"),
 }
 
 
@@ -26,6 +27,12 @@ def projects_kb(projects: list[str]) -> InlineKeyboardMarkup:
     builder.button(text="➕ Другой", callback_data="proj:other")
     builder.adjust(2)
     return builder.as_markup()
+
+
+def skip_goods_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="⏭ Пропустить", callback_data="goods:skip")]]
+    )
 
 
 def confirm_kb() -> InlineKeyboardMarkup:
