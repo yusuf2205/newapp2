@@ -66,6 +66,7 @@ class Settings:
     sheet_data: str = field(default_factory=lambda: _env("SHEET_DATA", "Данные"))
     sheet_employees: str = field(default_factory=lambda: _env("SHEET_EMPLOYEES", "Сотрудники"))
     sheet_projects: str = field(default_factory=lambda: _env("SHEET_PROJECTS", "Проекты"))
+    sheet_log: str = field(default_factory=lambda: _env("SHEET_LOG", "Журнал"))
 
     # --- Бизнес-справочники ---
     projects: list[str] = field(

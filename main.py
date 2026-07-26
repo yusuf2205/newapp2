@@ -12,7 +12,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 from config import settings
 from drive_watcher import DriveWatcher, ingest_new_files
-from handlers import documents, inn_group, registration
+from handlers import admin, documents, inn_group, registration
 from middlewares import EmployeeMiddleware
 from ocr import get_engine
 from sheets import SheetsRepo
@@ -53,6 +53,7 @@ async def main() -> None:
         data_sheet=settings.sheet_data,
         employees_sheet=settings.sheet_employees,
         projects_sheet=settings.sheet_projects,
+        log_sheet=settings.sheet_log,
     )
     await repo.init()
 
@@ -73,6 +74,7 @@ async def main() -> None:
     dispatcher.callback_query.middleware(employee_middleware)
 
     dispatcher.include_router(registration.router)
+    dispatcher.include_router(admin.router)
     dispatcher.include_router(documents.router)
     dispatcher.include_router(inn_group.router)
 

@@ -110,7 +110,11 @@ async def ingest_new_files(
     Возвращает количество найденных (новых) файлов."""
     async with watcher.lock:
         files = await asyncio.to_thread(watcher.list_new_files)
-        for meta in files:
+        for index, meta in enumerate(files):
+            if index:
+                # Пауза между файлами — иначе пачка новых файлов упирается в лимит
+                # Google Sheets API (Read/Write requests per minute per user).
+                await asyncio.sleep(1.5)
             await _ingest_one(watcher, meta, repo, bot, notify_chat_id, default_currency)
         return len(files)
 
@@ -127,29 +131,44 @@ async def _ingest_one(
     try:
         content = await asyncio.to_thread(watcher.download, meta["id"])
         recognized = await recognize_docx(content)
-        doc = DocumentData.from_ocr(recognized, default_currency)
-        if doc.executor == NOT_SET:
-            doc.executor = "Google Диск (авто)"
-        doc.note = f"Автоматически из Google Диска: {name}"
-
-        if doc.contract == NOT_SET and doc.counterparty == NOT_SET:
-            logger.warning("Не удалось распознать ключевые поля файла с Диска: %s", name)
-            if notify_chat_id:
-                await bot.send_message(
-                    notify_chat_id,
-                    f"⚠️ Файл «{name}» с Google Диска: не нашёл ни договора, ни контрагента — "
-                    "пропустил, проверьте вручную.",
-                )
-            return
-
-        row, updated = await repo.upsert_document(doc)
     except Exception:  # noqa: BLE001
-        logger.exception("Не удалось обработать файл с Диска: %s", name)
+        # Файл повреждён/нечитаем — это не изменится при повторной попытке,
+        # помечаем обработанным, чтобы не спотыкаться об него на каждом опросе.
+        logger.exception("Не удалось прочитать файл с Диска: %s", name)
+        watcher.mark_processed(meta["id"])
         if notify_chat_id:
             await bot.send_message(notify_chat_id, f"❌ Не удалось обработать файл «{name}» с Google Диска.")
         return
-    finally:
+
+    doc = DocumentData.from_ocr(recognized, default_currency)
+    if doc.executor == NOT_SET:
+        doc.executor = "Google Диск (авто)"
+    doc.note = f"Автоматически из Google Диска: {name}"
+
+    if doc.contract == NOT_SET and doc.counterparty == NOT_SET:
+        # Распознавание в принципе не нашло ключевых полей — повтор не поможет,
+        # помечаем обработанным.
+        logger.warning("Не удалось распознать ключевые поля файла с Диска: %s", name)
         watcher.mark_processed(meta["id"])
+        if notify_chat_id:
+            await bot.send_message(
+                notify_chat_id,
+                f"⚠️ Файл «{name}» с Google Диска: не нашёл ни договора, ни контрагента — "
+                "пропустил, проверьте вручную.",
+            )
+        return
+
+    try:
+        row, updated = await repo.upsert_document(doc)
+    except Exception:  # noqa: BLE001
+        # Запись в Sheets могла не пройти из-за временной ошибки (лимит API, сеть) —
+        # НЕ помечаем обработанным, следующий опрос попробует этот файл снова.
+        logger.exception("Не удалось записать файл с Диска в Sheets (попробуем ещё раз позже): %s", name)
+        if notify_chat_id:
+            await bot.send_message(notify_chat_id, f"❌ Не удалось обработать файл «{name}» с Google Диска.")
+        return
+
+    watcher.mark_processed(meta["id"])
 
     if notify_chat_id:
         status = "♻️ Обновлена" if updated else "✅ Новая"

@@ -13,9 +13,12 @@ import gspread
 from models import (
     COLUMNS,
     EMPLOYEE_COLUMNS,
+    LOG_COLUMNS,
     NOT_SET,
     PROJECT_COLUMNS,
+    STATUS_ACTIVE,
     DocumentData,
+    amount_cell,
     format_amount,
     parse_amount,
 )
@@ -81,12 +84,14 @@ class SheetsRepo:
         data_sheet: str,
         employees_sheet: str,
         projects_sheet: str = "Проекты",
+        log_sheet: str = "Журнал",
     ) -> None:
         self._credentials_file = credentials_file
         self._spreadsheet_id = spreadsheet_id
         self._data_title = data_sheet
         self._employees_title = employees_sheet
         self._projects_title = projects_sheet
+        self._log_title = log_sheet
         self._spreadsheet: gspread.Spreadsheet | None = None
         self._lock = asyncio.Lock()  # защищает read-modify-write при дедупликации
         self._custom_projects: list[str] = []  # кэш листа «Проекты», грузится в init()
@@ -130,8 +135,10 @@ class SheetsRepo:
         data_ws = await asyncio.to_thread(self._worksheet, self._data_title, COLUMNS)
         await asyncio.to_thread(self._worksheet, self._employees_title, EMPLOYEE_COLUMNS)
         await asyncio.to_thread(self._worksheet, self._projects_title, PROJECT_COLUMNS)
+        await asyncio.to_thread(self._worksheet, self._log_title, LOG_COLUMNS)
         self._custom_projects = await asyncio.to_thread(self._load_projects)
         await asyncio.to_thread(self._apply_conditional_formatting, data_ws)
+        await asyncio.to_thread(self._apply_number_format, data_ws)
         await asyncio.to_thread(self._build_analytics_sheet)
 
     # ---------- цветовая маркировка долга (лист «Данные») ----------
@@ -200,17 +207,42 @@ class SheetsRepo:
         ]
         spreadsheet.batch_update({"requests": requests})
 
+    # ---------- читаемые суммы (разделитель тысяч) ----------
+
+    def _apply_number_format(self, worksheet: gspread.Worksheet) -> None:
+        """«3000000» -> «3 000 000». Работает только если ячейка реально хранит число
+        (см. amount_cell в models.py) — на тексте числовой формат не действует."""
+        number_format = {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}
+        requests = [
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": worksheet.id,
+                        "startRowIndex": 1,
+                        "startColumnIndex": COL_TOTAL - 1,
+                        "endColumnIndex": COL_BALANCE,
+                    },
+                    "cell": {"userEnteredFormat": number_format},
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            }
+        ]
+        worksheet.spreadsheet.batch_update({"requests": requests})
+
     # ---------- лист «Аналитика» ----------
 
     def _build_analytics_sheet(self) -> None:
-        """Живая аналитика через QUERY — сама пересчитывается при любом изменении
-        листа «Данные», без участия бота.
+        """Простая наглядная аналитика для руководства: крупные итоговые цифры,
+        три коротких таблицы и три диаграммы. Пересчитывается сама формулами при
+        любом изменении листа «Данные», без участия бота.
 
         QUERY надёжнее связки UNIQUE+FILTER+SORT: та комбинация даёт #REF!, когда
         несколько независимых формул динамических массивов ссылаются друг на друга
         в одном диапазоне. Поэтому сначала строим «чистое зеркало» нужных колонок
         (каждая — независимый ARRAYFORMULA прямо от листа «Данные», без ссылок на
-        другие формулы этого листа) и уже по нему считаем через QUERY."""
+        другие формулы этого листа) и уже по нему считаем через QUERY. Зеркало —
+        техническая часть, прячем колонки N:Q, чтобы не мешать взгляду.
+        """
         spreadsheet = self._connect()
         title = "Аналитика"
         try:
@@ -225,7 +257,7 @@ class SheetsRepo:
         d = self._data_title  # имя листа «Данные» — вдруг переименован через .env
         not_set = NOT_SET
         values = {
-            # --- «чистое зеркало» строк «Данные» (не трогать руками) ---
+            # --- «чистое зеркало» строк «Данные» (техническое, колонки скрыты) ---
             "N1": "Поставщик", "O1": "Оплачено", "P1": "Остаток", "Q1": "Проект",
             # Суммы в «Данные» пишутся с точкой как разделителем (Python Decimal), а
             # локаль таблицы ru_RU ожидает запятую — VALUE() без SUBSTITUTE не понимает
@@ -234,40 +266,79 @@ class SheetsRepo:
             "O2": f"=ARRAYFORMULA(IFERROR(VALUE(SUBSTITUTE({d}!G2:G1000;\".\";\",\"));0))",
             "P2": f"=ARRAYFORMULA(IFERROR(VALUE(SUBSTITUTE({d}!H2:H1000;\".\";\",\"));0))",
             "Q2": f"=ARRAYFORMULA(IF({d}!A2:A1000=\"\";\"\";{d}!A2:A1000))",
-            # --- видимые блоки ---
-            "A1": "Итого оплачено (все договоры)", "B1": "=SUM(O2:O1000)",
-            "A2": "Итого долг (сумма всех остатков > 0)", "B2": '=SUMIF(P2:P1000;">0")',
-            "A4": "С какими поставщиками работаем чаще всего / больше всего платим",
+            # --- крупные итоговые цифры ---
+            "A1": "💰 ОПЛАЧЕНО ВСЕГО", "B1": "=SUM(O2:O1000)",
+            "A2": "🔴 ОБЩИЙ ДОЛГ", "B2": '=SUMIF(P2:P1000;">0")',
+            # --- три коротких таблицы (данные для диаграмм ниже) ---
+            "A4": "📊 Кому платим больше всего",
             "A5": (
                 f"=QUERY(N2:Q1000;\"select N, count(N), sum(O), sum(P) "
                 f"where N is not null and N <> '' and N <> '{not_set}' "
                 f"group by N order by sum(O) desc "
-                f"label count(N) 'Кол-во договоров', sum(O) 'Оплачено всего', sum(P) 'Долг (остаток)'\";0)"
+                f"label count(N) 'Договоров', sum(O) 'Оплачено', sum(P) 'Долг'\";0)"
             ),
-            "G4": "Кому мы должны (по убыванию долга — нулевые внизу списка)",
+            "G4": "🔴 Кому мы должны",
             "G5": (
                 f"=QUERY(N2:Q1000;\"select N, sum(P) "
-                f"where N is not null and N <> '' and N <> '{not_set}' "
+                f"where N is not null and N <> '' and N <> '{not_set}' and P > 0 "
                 f"group by N order by sum(P) desc "
                 f"label sum(P) 'Долг'\";0)"
             ),
-            "J4": "Расходы по проектам",
+            "J4": "🏗 Расходы по проектам",
             "J5": (
                 f"=QUERY(N2:Q1000;\"select Q, count(Q), sum(O) "
                 f"where Q is not null and Q <> '' and Q <> '{not_set}' "
                 f"group by Q order by sum(O) desc "
-                f"label count(Q) 'Кол-во договоров', sum(O) 'Оплачено всего'\";0)"
+                f"label count(Q) 'Договоров', sum(O) 'Оплачено'\";0)"
             ),
         }
         worksheet.batch_update(
             [{"range": cell, "values": [[value]]} for cell, value in values.items()],
             value_input_option="USER_ENTERED",
         )
+
         worksheet.format("N1:Q1", {"textFormat": {"bold": True}})
-        worksheet.format("A1:A2", {"textFormat": {"bold": True}})
-        worksheet.format("A4", {"textFormat": {"bold": True}})
-        worksheet.format("G4", {"textFormat": {"bold": True}})
-        worksheet.format("J4", {"textFormat": {"bold": True}})
+        worksheet.format("A1:A2", {"textFormat": {"bold": True, "fontSize": 13}})
+        worksheet.format("B1:B2", {"textFormat": {"bold": True, "fontSize": 20}})
+        worksheet.format("B1", {"backgroundColor": {"red": 0.85, "green": 0.95, "blue": 0.85}})
+        worksheet.format("B2", {"backgroundColor": {"red": 0.98, "green": 0.85, "blue": 0.85}})
+        worksheet.format("A4", {"textFormat": {"bold": True, "fontSize": 12}})
+        worksheet.format("G4", {"textFormat": {"bold": True, "fontSize": 12}})
+        worksheet.format("J4", {"textFormat": {"bold": True, "fontSize": 12}})
+
+        number_format = {"numberFormat": {"type": "NUMBER", "pattern": "#,##0"}}
+        for cell_range in ("B1:B2", "C5:D500", "H5:H500", "L5:L500", "O2:P1000"):
+            worksheet.format(cell_range, number_format)
+
+        self._hide_columns(worksheet, start=13, end=17)  # N:Q (0-индексовано 13..16)
+        self._remove_analytics_charts(worksheet)
+
+    def _hide_columns(self, worksheet: gspread.Worksheet, start: int, end: int) -> None:
+        worksheet.spreadsheet.batch_update({"requests": [{
+            "updateDimensionProperties": {
+                "range": {
+                    "sheetId": worksheet.id, "dimension": "COLUMNS",
+                    "startIndex": start, "endIndex": end,
+                },
+                "properties": {"hiddenByUser": True},
+                "fields": "hiddenByUser",
+            }
+        }]})
+
+    def _remove_analytics_charts(self, worksheet: gspread.Worksheet) -> None:
+        """Диаграммы не прижились — убираем (если остались от предыдущей версии)."""
+        spreadsheet = worksheet.spreadsheet
+        metadata = spreadsheet.fetch_sheet_metadata(
+            params={"fields": "sheets(properties(sheetId),charts(chartId))"}
+        )
+        sheet_meta = next(
+            (s for s in metadata["sheets"] if s["properties"]["sheetId"] == worksheet.id), None
+        )
+        existing_charts = sheet_meta.get("charts", []) if sheet_meta else []
+        if not existing_charts:
+            return
+        requests = [{"deleteEmbeddedObject": {"objectId": c["chartId"]}} for c in existing_charts]
+        spreadsheet.batch_update({"requests": requests})
 
     # ---------- сотрудники ----------
 
@@ -285,28 +356,74 @@ class SheetsRepo:
                     "fio": row[1],
                     "position": row[2],
                     "date": row[3],
-                    "status": row[4] or "Активен",
+                    "status": row[4] or STATUS_ACTIVE,
                 }
         return None
 
     async def get_employee(self, telegram_id: int) -> dict | None:
         return await asyncio.to_thread(self._find_employee, telegram_id)
 
-    def _add_employee(self, telegram_id: int, fio: str, position: str) -> dict:
+    def _add_employee(self, telegram_id: int, fio: str, position: str, status: str) -> dict:
         worksheet = self._worksheet(self._employees_title, EMPLOYEE_COLUMNS)
         row = [
             str(telegram_id),
             fio,
             position,
             datetime.now().strftime("%d.%m.%Y %H:%M"),
-            "Активен",
+            status,
         ]
         worksheet.append_row(row, value_input_option="USER_ENTERED")
         return {"row": len(worksheet.col_values(1)), "telegram_id": str(telegram_id),
-                "fio": fio, "position": position, "date": row[3], "status": "Активен"}
+                "fio": fio, "position": position, "date": row[3], "status": status}
 
-    async def add_employee(self, telegram_id: int, fio: str, position: str) -> dict:
-        return await asyncio.to_thread(self._add_employee, telegram_id, fio, position)
+    async def add_employee(
+        self, telegram_id: int, fio: str, position: str, status: str = STATUS_ACTIVE
+    ) -> dict:
+        return await asyncio.to_thread(self._add_employee, telegram_id, fio, position, status)
+
+    def _set_employee_status(self, telegram_id: int, status: str) -> dict | None:
+        worksheet = self._worksheet(self._employees_title, EMPLOYEE_COLUMNS)
+        employee = self._find_employee(telegram_id)
+        if employee is None:
+            return None
+        worksheet.update_cell(employee["row"], 5, status)
+        employee["status"] = status
+        return employee
+
+    async def set_employee_status(self, telegram_id: int, status: str) -> dict | None:
+        """Вернуть обновлённую карточку сотрудника или None, если он не найден."""
+        return await asyncio.to_thread(self._set_employee_status, telegram_id, status)
+
+    def _list_employees(self) -> list[dict]:
+        worksheet = self._worksheet(self._employees_title, EMPLOYEE_COLUMNS)
+        result = []
+        for index, row in enumerate(worksheet.get_all_values()[1:], start=2):
+            row = row + [""] * (len(EMPLOYEE_COLUMNS) - len(row))
+            if not row[0].strip():
+                continue
+            result.append({
+                "row": index, "telegram_id": row[0], "fio": row[1],
+                "position": row[2], "date": row[3], "status": row[4] or STATUS_ACTIVE,
+            })
+        return result
+
+    async def list_employees(self) -> list[dict]:
+        return await asyncio.to_thread(self._list_employees)
+
+    # ---------- журнал действий ----------
+
+    def _log_action(self, actor: str, action: str, details: str = "") -> None:
+        worksheet = self._worksheet(self._log_title, LOG_COLUMNS)
+        worksheet.append_row(
+            [datetime.now().strftime("%d.%m.%Y %H:%M"), actor, action, details],
+            value_input_option="USER_ENTERED",
+        )
+
+    async def log_action(self, actor: str, action: str, details: str = "") -> None:
+        try:
+            await asyncio.to_thread(self._log_action, actor, action, details)
+        except Exception:  # noqa: BLE001
+            logger.exception("Не удалось записать в журнал действий: %s / %s", actor, action)
 
     # ---------- проекты ----------
 
@@ -375,8 +492,8 @@ class SheetsRepo:
             new_paid = old_paid + (doc.paid or Decimal(0))
             total = parse_amount(row[COL_TOTAL - 1]) or doc.total
 
-            values = [[format_amount(total), format_amount(new_paid),
-                       format_amount(total - new_paid if total is not None else None)]]
+            values = [[amount_cell(total), amount_cell(new_paid),
+                       amount_cell(total - new_paid if total is not None else None)]]
             worksheet.update(
                 f"F{index}:H{index}", values, value_input_option="USER_ENTERED"
             )
@@ -421,7 +538,7 @@ class SheetsRepo:
             )
             worksheet.update(
                 f"F{index}:H{index}",
-                [[format_amount(total), format_amount(paid), format_amount(balance)]],
+                [[amount_cell(total), amount_cell(paid), amount_cell(balance)]],
                 value_input_option="USER_ENTERED",
             )
             if doc.inn != NOT_SET:

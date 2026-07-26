@@ -137,4 +137,11 @@ async def handle_group_file(
         if result["balance"] < 0:
             lines.append("⚠️ Оплачено больше суммы договора — проверьте вручную!")
 
+    actor = f"{message.from_user.id}" + (f" (@{message.from_user.username})" if message.from_user.username else "")
+    await repo.log_action(
+        actor,
+        "Сверил договор из группы" if result["updated"] else "Записал договор из группы",
+        f"строка {result['row']}, {doc.contract}, {result['counterparty']}",
+    )
+
     await message.reply("\n".join(lines))

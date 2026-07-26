@@ -26,7 +26,15 @@ COLUMNS = [
 
 EMPLOYEE_COLUMNS = ["Telegram ID", "ФИО", "Должность", "Дата", "Статус"]
 
+STATUS_ACTIVE = "Активен"
+STATUS_PENDING = "Ожидает подтверждения"
+STATUS_BLOCKED = "Заблокирован"
+STATUS_ARCHIVED = "В архиве"
+STATUS_DENIED = "Отклонено"
+
 PROJECT_COLUMNS = ["Название"]
+
+LOG_COLUMNS = ["Дата и время", "Кто", "Действие", "Детали"]
 
 CURRENCIES = {"UZS", "USD", "EUR", "RUB"}
 
@@ -71,10 +79,17 @@ def parse_amount(value) -> Decimal | None:
 
 
 def format_amount(value: Decimal | None) -> str:
-    """Decimal -> '177800000.00'. None -> '[Не указано]'."""
+    """Decimal -> '177800000.00'. None -> '[Не указано]'. Для текста в Телеграме."""
     if value is None:
         return NOT_SET
     return f"{value:.2f}"
+
+
+def amount_cell(value: Decimal | None):
+    """Decimal -> float, None -> '[Не указано]'. Для записи В GOOGLE SHEETS: значение
+    должно быть настоящим числом (не текстом), иначе числовой формат (разделитель
+    тысяч) в таблице не применяется — ячейка с текстом "3000000.00" не форматируется."""
+    return float(value) if value is not None else NOT_SET
 
 
 def _resolve_amounts(data: dict) -> tuple[Decimal | None, Decimal | None]:
@@ -164,16 +179,16 @@ class DocumentData:
             raw_text=str(data.get("raw_text", ""))[:4000],
         )
 
-    def to_row(self) -> list[str]:
+    def to_row(self) -> list:
         return [
             self.project,
             self.counterparty,
             self.contract,
             self.contract_type,
             self.goods,
-            format_amount(self.total),
-            format_amount(self.paid),
-            format_amount(self.balance),
+            amount_cell(self.total),
+            amount_cell(self.paid),
+            amount_cell(self.balance),
             self.currency,
             self.executor,
             self.note,

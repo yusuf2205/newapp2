@@ -282,6 +282,13 @@ async def confirm(call: CallbackQuery, state: FSMContext, repo: SheetsRepo) -> N
     else:
         text = f"✅ Записано в таблицу, строка <b>№{row}</b>."
 
+    await repo.log_action(
+        f"{call.from_user.id}",
+        "Обновил договор" if updated else "Записал документ",
+        f"строка {row}, {doc.contract}, {doc.counterparty}, "
+        f"{format_amount(doc.paid)} {doc.currency}",
+    )
+
     await call.message.edit_text(f"{doc.as_card()}\n\n{text}")
     await call.answer("Готово")
 

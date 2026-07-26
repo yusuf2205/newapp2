@@ -140,13 +140,29 @@ CONTRACT_RE = re.compile(
     re.IGNORECASE,
 )
 DATE_RE = re.compile(r"\b(\d{1,2}[./-]\d{1,2}[./-]\d{2,4})\b")
+
+# Одно корректно оформленное число: группы по 1-3 цифры, разделённые пробелом
+# (тысячи), с необязательной дробной частью из 1-2 цифр. Раньше захват был
+# "жадным" классом символов [\d ,.'\xa0]{3,} без ограничения — если рядом через
+# пробел/без разделителя шло НЕСКОЛЬКО чисел (типичная строка "Итого" в таблице
+# спецификации: "32 857 142.86 | 3 942 857.14 | 36 800 000.00", а в PDF без
+# текстового слоя таблиц ещё и без "|"), все они склеивались в одну
+# астрономическую цифру. Эта форма останавливается на границе одного числа.
+_AMOUNT_PATTERN = r"\d{1,3}(?:[ \xa0']\d{3})*(?:[.,]\d{1,2})?"
 TOTAL_RE = re.compile(
     r"(?:итого|всего к оплате|всего|jami|jami summa|umumiy|total|сумма к оплате)"
-    r"[^\d\n]{0,20}([\d ,.' ]{3,})",
+    rf"[^\d\n]{{0,20}}({_AMOUNT_PATTERN})",
     re.IGNORECASE,
 )
 PAID_RE = re.compile(
-    r"(?:оплачено|оплата|to['`’]?langan|paid|принято|внесено)[^\d\n]{0,20}([\d ,.' ]{3,})",
+    r"(?:оплачено|оплата|to['`’]?langan|paid|принято|внесено)"
+    rf"[^\d\n]{{0,20}}({_AMOUNT_PATTERN})",
+    re.IGNORECASE,
+)
+# Типовая формулировка в конце договора — надёжнее строки «Итого» таблицы
+# спецификации (та может указывать сумму БЕЗ НДС в первой попавшейся колонке).
+CONTRACT_TOTAL_LABEL_RE = re.compile(
+    rf"Общая\s+сумма\s+договора\s+составляет[\s\S]{{0,200}}?\(({_AMOUNT_PATTERN})\)",
     re.IGNORECASE,
 )
 CURRENCY_MAP = {
@@ -273,7 +289,7 @@ def parse_plain_text(text: str) -> dict:
         "payment_amount": payment_amount,
         "payment_note": payment_note,
         "doc_number": doc_number,
-        "total": _first_match(TOTAL_RE, text),
+        "total": _first_match(CONTRACT_TOTAL_LABEL_RE, text) or _first_match(TOTAL_RE, text),
         "paid": _first_match(PAID_RE, text),
         "currency": currency,
         "raw_text": text,

@@ -47,6 +47,31 @@ def confirm_kb() -> InlineKeyboardMarkup:
     )
 
 
+def approve_registration_kb(telegram_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[
+            InlineKeyboardButton(text="✅ Разрешить", callback_data=f"reg:approve:{telegram_id}"),
+            InlineKeyboardButton(text="❌ Отклонить", callback_data=f"reg:deny:{telegram_id}"),
+        ]]
+    )
+
+
+def employee_status_kb(telegram_id: int, status: str) -> InlineKeyboardMarkup:
+    """Кнопки зависят от текущего статуса — не показываем действие, которое и так уже применено."""
+    buttons: list[InlineKeyboardButton] = []
+    if status != "Активен":
+        buttons.append(InlineKeyboardButton(text="✅ Разблокировать", callback_data=f"emp:activate:{telegram_id}"))
+    if status != "Заблокирован":
+        buttons.append(InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"emp:block:{telegram_id}"))
+    if status != "В архиве":
+        buttons.append(InlineKeyboardButton(text="📦 В архив", callback_data=f"emp:archive:{telegram_id}"))
+    builder = InlineKeyboardBuilder()
+    for button in buttons:
+        builder.add(button)
+    builder.adjust(1)
+    return builder.as_markup()
+
+
 def edit_fields_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     for key, (label, _) in EDITABLE_FIELDS.items():
